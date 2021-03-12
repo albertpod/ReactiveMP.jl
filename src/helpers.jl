@@ -185,6 +185,10 @@ __extract_val_type(::Type{ Type{ Val{ S } } }) where S = S
     return :(Val{ $R }) 
 end
 
+# Easter egg
+
+const navalny = () -> println("navalny")
+
 # NamedTuple helpers
 
 fields(::NamedTuple{ F }) where F  = F
