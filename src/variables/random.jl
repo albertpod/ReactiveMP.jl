@@ -14,8 +14,8 @@ strategy_fn(::FoldLeftProdStrategy)  = foldl_reduce_to_marginal
 strategy_fn(::FoldRightProdStrategy) = foldr_reduce_to_marginal
 strategy_fn(::AllAtOnceProdStrategy) = all_reduce_to_marginal
 
-default_prod_strategy()  = FoldLeftProdStrategy()
-default_cache_strategy() = NoCacheStrategy()
+default_var_prod_strategy()  = FoldLeftProdStrategy()
+default_var_cache_strategy() = NoCacheStrategy()
 
 ## Random variable props
 
@@ -36,15 +36,15 @@ struct RandomVariable{S, C} <: AbstractVariable
     cache_strategy :: C
 end
 
-function randomvar(name::Symbol; prod_strategy = default_prod_strategy(), cache_strategy = default_cache_strategy()) 
+function randomvar(name::Symbol; prod_strategy = default_var_prod_strategy(), cache_strategy = default_var_cache_strategy()) 
     return RandomVariable(name, Vector{LazyObservable{AbstractMessage}}(), RandomVariableProps(), prod_strategy, cache_strategy)
 end
 
-function randomvar(name::Symbol, dims::Tuple; prod_strategy = default_prod_strategy(), cache_strategy = default_cache_strategy())
+function randomvar(name::Symbol, dims::Tuple; prod_strategy = default_var_prod_strategy(), cache_strategy = default_var_cache_strategy())
     return randomvar(name, dims...; prod_strategy = prod_strategy, cache_strategy = cache_strategy)
 end
 
-function randomvar(name::Symbol, dims::Vararg{Int}; prod_strategy = default_prod_strategy(), cache_strategy = default_cache_strategy())
+function randomvar(name::Symbol, dims::Vararg{Int}; prod_strategy = default_var_prod_strategy(), cache_strategy = default_var_cache_strategy())
     vars = Array{RandomVariable}(undef, dims)
     for index in CartesianIndices(axes(vars))
         @inbounds vars[index] = randomvar(Symbol(name, :_, Symbol(join(index.I, :_))); prod_strategy = prod_strategy, cache_strategy = cache_strategy)
@@ -88,20 +88,22 @@ m_right(eqnode::EqualityNode)  = eqnode.right
 m_bottom(eqnode::EqualityNode) = eqnode.bottom
 
 struct EqualityChainCacheStrategy 
-    eq_nodes :: Vector{ EqualityNode }
+    eq_nodes  :: Vector{ EqualityNode }
+    scheduler :: LimitStackScheduler
 end
 
-EqualityChainCacheStrategy() = EqualityChainCacheStrategy(Vector{EqualityNode}())
+EqualityChainCacheStrategy() = EqualityChainCacheStrategy(Vector{EqualityNode}(), LimitStackScheduler(500))
 
 is_initialized(cache::EqualityChainCacheStrategy) = length(cache.eq_nodes) > 0
+scheduler(cache::EqualityChainCacheStrategy)      = cache.scheduler
 
 m_left(cache::EqualityChainCacheStrategy, index)   = m_left(cache.eq_nodes[index])
 m_right(cache::EqualityChainCacheStrategy, index)  = m_right(cache.eq_nodes[index])
 m_bottom(cache::EqualityChainCacheStrategy, index) = m_bottom(cache.eq_nodes[index])
 
-set_m_left!(cache::EqualityChainCacheStrategy, index, observable)   = set!(m_left(cache, index), observable |> share_recent())
-set_m_right!(cache::EqualityChainCacheStrategy, index, observable)  = set!(m_right(cache, index), observable |> share_recent())
-set_m_bottom!(cache::EqualityChainCacheStrategy, index, observable) = set!(m_bottom(cache, index), observable |> share_recent())
+set_m_left!(cache::EqualityChainCacheStrategy, index, observable)   = set!(m_left(cache, index), observable |> schedule_on(scheduler(cache)) |> share_recent())
+set_m_right!(cache::EqualityChainCacheStrategy, index, observable)  = set!(m_right(cache, index), observable |> schedule_on(scheduler(cache)) |> share_recent())
+set_m_bottom!(cache::EqualityChainCacheStrategy, index, observable) = set!(m_bottom(cache, index), observable |> schedule_on(scheduler(cache)) |> share_recent())
 
 output_eq(stream1, stream2) = combineLatest((stream1, stream2), PushNew()) |> map(AbstractMessage, (v) -> as_message(v[1]) * as_message(v[2]))
 
