@@ -110,7 +110,7 @@ function initialize!(cache::EqualityChainCacheStrategy, randomvar::RandomVariabl
     end
 
     output_eq = let prod_parametrisation = prod_parametrisation(randomvar)
-        (stream1, stream2) -> combineLatest((stream1, stream2), PushNew()) |> map(AbstractMessage, (v) -> prod(prod_parametrisation, v[1], v[2]))
+        (stream1, stream2) -> combineLatest((stream1, stream2), PushNew()) |> map(AbstractMessage, (v) -> multiply_messages(prod_parametrisation, as_message(v[1]), as_message(v[2])))
     end
 
     # First Equality node
@@ -165,8 +165,8 @@ end
 inbound_portal(randomvar::RandomVariable)          = randomvar.portal
 inbound_portal!(randomvar::RandomVariable, portal) = randomvar.portal = portal
 
-_getmarginal(randomvar::RandomVariable)                                = randomvar.props.marginal
-_setmarginal!(randomvar::RandomVariable, marginal::MarginalObservable) = randomvar.props.marginal = marginal
+_getmarginal(randomvar::RandomVariable)                                = randomvar.marginal
+_setmarginal!(randomvar::RandomVariable, marginal::MarginalObservable) = randomvar.marginal = marginal
 _makemarginal(randomvar::RandomVariable)                               = _makemarginal(cache_strategy(randomvar), randomvar)
 
 function setmessagein!(randomvar::RandomVariable, index::Int, messagein)
