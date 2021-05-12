@@ -59,10 +59,13 @@ outbound_message_portal(factornode::GammaMixtureNode)   = factornode.portal
 setmarginal!(factornode::GammaMixtureNode, cname::Symbol, marginal)                = error("setmarginal() function is not implemented for GammaMixtureNode")
 getmarginal!(factornode::GammaMixtureNode, localmarginal::FactorNodeLocalMarginal) = error("getmarginal() function is not implemented for GammaMixtureNode")
 
-## Metadata 
+## Metadata
 
-get_or_default_meta(fform::Type{ <: GammaMixture }, meta::GammaMixtureNodeMetadata) = meta
-get_or_default_meta(fform::Type{ <: GammaMixture }, meta::Nothing)                  = GammaMixtureNodeMetadata(GaussLaguerreQuadrature(32))
+const DefaultGammaMixtureMetadata = GammaMixtureNodeMetadata(GaussLaguerreQuadrature(32))
+
+collect_meta(fform::Type{ <: GammaMixture }, meta::Any)                      = error("Invalid meta object $(meta) passed to GammaMixture node.")
+collect_meta(fform::Type{ <: GammaMixture }, meta::GammaMixtureNodeMetadata) = meta
+collect_meta(fform::Type{ <: GammaMixture }, meta::Nothing)                  = DefaultGammaMixtureMetadata
 
 ## activate!
 
@@ -130,9 +133,9 @@ end
 
 # FreeEnergy related functions
 
-@average_energy GammaMixture (q_out::Any, q_switch::Any, q_a::NTuple{N, GammaShapeRate}, q_b::NTuple{N, GammaShapeRate}) where N = begin
+@average_energy GammaMixture (q_out::Any, q_switch::Any, q_a::NTuple{N, Any}, q_b::NTuple{N, GammaShapeRate}) where N = begin
     z_bar = probvec(q_switch)
-    return mapreduce(+, 1:N, init = 0.0) do 
+    return mapreduce(+, 1:N, init = 0.0) do i
         return z_bar[i] * score(AverageEnergy(), GammaShapeRate, Val{ (:out, :α , :β) }, map((q) -> Marginal(q, false, false), (q_out, q_a[i], q_b[i])), nothing)
     end
 end
@@ -170,6 +173,8 @@ as_node_functional_form(::Type{ <: GammaMixture }) = ValidNodeFunctionalForm()
 
 sdtype(::Type{ <: GammaMixture }) = Stochastic()
 
+collect_factorisation(::Type{ <: GammaMixture }, factorisation) = factorisation
+
 function ReactiveMP.make_node(::Type{ <: GammaMixture{N} }; factorisation::F = MeanField(), meta::M = nothing, portal::P = EmptyPortal()) where { N, F, M, P }
     @assert N >= 2 "GammaMixtureNode requires at least two mixtures on input"
     @assert typeof(factorisation) <: GammaMixtureNodeFactorisationSupport "GammaMixtureNode supports only following factorisations: [ $(GammaMixtureNodeFactorisationSupport) ]"
@@ -177,12 +182,12 @@ function ReactiveMP.make_node(::Type{ <: GammaMixture{N} }; factorisation::F = M
     switch = NodeInterface(:switch)
     as   = ntuple((index) -> IndexedNodeInterface(index, NodeInterface(:a)), N)
     bs   = ntuple((index) -> IndexedNodeInterface(index, NodeInterface(:b)), N)
-    meta = get_or_default_meta(GammaMixture, meta)
+    meta = collect_meta(GammaMixture, meta)
     return GammaMixtureNode{N, F, typeof(meta), P}(factorisation, out, switch, as, bs, meta, portal)
 end
 
 function ReactiveMP.make_node(::Type{ <: GammaMixture }, out::AbstractVariable, switch::AbstractVariable, as::NTuple{N, AbstractVariable}, bs::NTuple{N, AbstractVariable}; factorisation = MeanField(), meta = nothing, portal = EmptyPortal()) where { N}
-    node = make_node(GammaMixture{N}, factorisation = factorisation, meta = meta, portal = portal)
+    node = make_node(GammaMixture{N}, factorisation = collect_factorisation(GammaMixture, factorisation), meta = collect_meta(GammaMixture, meta), portal = portal)
 
     # out
     out_index = getlastindex(out)

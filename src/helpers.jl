@@ -9,6 +9,8 @@ import Base: IteratorEltype, HasEltype
 import Base: eltype, length, size
 import Base: IndexStyle, IndexLinear, getindex
 
+import Rocket: similar_typeof
+
 struct SkipIndexIterator{T, I} <: AbstractVector{T}
     iterator :: I
     skip     :: Int
@@ -30,7 +32,10 @@ Base.eltype(::Type{<:SkipIndexIterator{T}}) where T = T
 Base.length(iter::SkipIndexIterator)                = length(iter.iterator) - 1
 Base.size(iter::SkipIndexIterator)                  = (length(iter), )
 
-Base.getindex(iter::SkipIndexIterator, i) = i < skip(iter) ? @inbounds(iter.iterator[i]) : @inbounds(iter.iterator[i + 1])
+Base.getindex(iter::SkipIndexIterator, i::Int)               = i < skip(iter) ? @inbounds(iter.iterator[i]) : @inbounds(iter.iterator[i + 1])
+Base.getindex(iter::SkipIndexIterator, i::CartesianIndex{1}) = Base.getindex(iter, first(i.I))
+
+Rocket.similar_typeof(::SkipIndexIterator, ::Type{L}) where L = Vector{L}
 
 """
     @symmetrical `function_definition`
@@ -101,11 +106,14 @@ Base.:-(a::Infinity, b::Infinity) = Infinity(degree(a) - degree(b))
 Base.:+(a::Infinity)              = Infinity(+degree(a))
 Base.:-(a::Infinity)              = Infinity(-degree(a))
 
-Base.:*(::Infinity, ::Real)     = error("Infinity multiplication is disallowed")
-Base.:*(::Real, ::Infinity)     = error("Infinity multiplication is disallowed")
+Base.:*(i::Infinity, d::Int) = Infinity(degree(i) * d)
+Base.:*(d::Int, i::Infinity) = Infinity(degree(i) * d)
+
+Base.:*(::Infinity, ::Real)     = error("Infinity multiplication on real numbers is disallowed")
+Base.:*(::Real, ::Infinity)     = error("Infinity multiplication on real numbers is disallowed")
 Base.:*(::Infinity, ::Infinity) = error("Infinity multiplication is disallowed")
-Base.:/(::Infinity, ::Real)     = error("Infinity division is disallowed")
-Base.:/(::Real, ::Infinity)     = error("Infinity division is disallowed")
+Base.:/(::Infinity, ::Real)     = error("Infinity division on real numbers is disallowed")
+Base.:/(::Real, ::Infinity)     = error("Infinity division on real numbers is disallowed")
 Base.:/(::Infinity, ::Infinity) = error("Infinity division is disallowed")
 
 Base.zero(::Type{Infinity})       = Infinity(0)

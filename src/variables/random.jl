@@ -10,51 +10,44 @@ struct FoldRightProdStrategy end
 # Fallbacks to FoldLeftProdStrategy in case if there is no suitable method
 struct AllAtOnceProdStrategy end
 
-strategy_fn(::FoldLeftProdStrategy)  = foldl_reduce_to_marginal
-strategy_fn(::FoldRightProdStrategy) = foldr_reduce_to_marginal
-strategy_fn(::AllAtOnceProdStrategy) = all_reduce_to_marginal
-
-default_var_prod_strategy()  = FoldLeftProdStrategy()
-default_var_cache_strategy() = NoCacheStrategy()
-
-## Random variable props
-
-mutable struct RandomVariableProps
-    marginal :: Union{Nothing, MarginalObservable}
-    portal   :: AbstractPortal 
-
-    RandomVariableProps() = new(nothing, EmptyPortal())
-end
+strategy_fn(::FoldLeftProdStrategy, prod_parametrisation)  = foldl_reduce_to_marginal(prod_parametrisation)
+strategy_fn(::FoldRightProdStrategy, prod_parametrisation) = foldr_reduce_to_marginal(prod_parametrisation)
+strategy_fn(::AllAtOnceProdStrategy, prod_parametrisation) = all_reduce_to_marginal(prod_parametrisation)
 
 ## Random variable implementation
 
-struct RandomVariable{S, C} <: AbstractVariable
+mutable struct RandomVariable{C, S, H} <: AbstractVariable
     name           :: Symbol
     inputmsgs      :: Vector{LazyObservable{AbstractMessage}}
-    props          :: RandomVariableProps
+    constraint     :: C
     prod_strategy  :: S
-    cache_strategy :: C
+    cache_strategy :: H
+    marginal       :: Union{Nothing, MarginalObservable}
+    portal         :: AbstractPortal
 end
 
-function randomvar(name::Symbol; prod_strategy = default_var_prod_strategy(), cache_strategy = default_var_cache_strategy()) 
-    return RandomVariable(name, Vector{LazyObservable{AbstractMessage}}(), RandomVariableProps(), prod_strategy, cache_strategy)
+function randomvar(name::Symbol; constraint = Marginalisation(), prod_strategy = FoldLeftProdStrategy(), cache_strategy = NoCacheStrategy()) 
+    return RandomVariable(name, Vector{LazyObservable{AbstractMessage}}(), constraint, prod_strategy, cache_strategy, nothing, EmptyPortal())
 end
 
-function randomvar(name::Symbol, dims::Tuple; prod_strategy = default_var_prod_strategy(), cache_strategy = default_var_cache_strategy())
-    return randomvar(name, dims...; prod_strategy = prod_strategy, cache_strategy = cache_strategy)
+function randomvar(name::Symbol, dims::Tuple; constraint = Marginalisation(), prod_strategy = FoldLeftProdStrategy(), cache_strategy = NoCacheStrategy())
+    return randomvar(name, dims...; constraint = constraint, prod_strategy = prod_strategy, cache_strategy = cache_strategy)
 end
 
-function randomvar(name::Symbol, dims::Vararg{Int}; prod_strategy = default_var_prod_strategy(), cache_strategy = default_var_cache_strategy())
+function randomvar(name::Symbol, dims::Vararg{Int}; constraint = Marginalisation(), prod_strategy = FoldLeftProdStrategy(), cache_strategy = NoCacheStrategy())
     vars = Array{RandomVariable}(undef, dims)
     for index in CartesianIndices(axes(vars))
-        @inbounds vars[index] = randomvar(Symbol(name, :_, Symbol(join(index.I, :_))); prod_strategy = prod_strategy, cache_strategy = cache_strategy)
+        @inbounds vars[index] = randomvar(Symbol(name, :_, Symbol(join(index.I, :_))); constraint = constraint, prod_strategy = prod_strategy, cache_strategy = cache_strategy)
     end
     return vars
 end
 
-degree(randomvar::RandomVariable)         = length(randomvar.inputmsgs)
-prod_strategy(randomvar::RandomVariable)  = randomvar.prod_strategy
-cache_strategy(randomvar::RandomVariable) = randomvar.cache_strategy
+degree(randomvar::RandomVariable)               = length(randomvar.inputmsgs)
+name(randomvar::RandomVariable)                 = randomvar.name
+constraint(randomvar::RandomVariable)           = randomvar.constraint
+prod_strategy(randomvar::RandomVariable)        = randomvar.prod_strategy
+cache_strategy(randomvar::RandomVariable)       = randomvar.cache_strategy
+prod_parametrisation(randomvar::RandomVariable) = prod_parametrisation(constraint(randomvar))
 
 getlastindex(randomvar::RandomVariable) = length(randomvar.inputmsgs) + 1
 
@@ -70,7 +63,7 @@ function messageout(::NoCacheStrategy, randomvar::RandomVariable, index::Int)
 end
 
 function _makemarginal(::NoCacheStrategy, randomvar::RandomVariable) 
-    return collectLatest(AbstractMessage, Marginal, randomvar.inputmsgs, strategy_fn(prod_strategy(randomvar)))
+    return collectLatest(AbstractMessage, Marginal, randomvar.inputmsgs, strategy_fn(prod_strategy(randomvar), prod_parametrisation(randomvar)))
 end
 
 # Equality chain outbound messages strategy 
@@ -105,8 +98,6 @@ set_m_left!(cache::EqualityChainCacheStrategy, index, observable)   = set!(m_lef
 set_m_right!(cache::EqualityChainCacheStrategy, index, observable)  = set!(m_right(cache, index), observable |> schedule_on(scheduler(cache)) |> share_recent())
 set_m_bottom!(cache::EqualityChainCacheStrategy, index, observable) = set!(m_bottom(cache, index), observable |> schedule_on(scheduler(cache)) |> share_recent())
 
-output_eq(stream1, stream2) = combineLatest((stream1, stream2), PushNew()) |> map(AbstractMessage, (v) -> as_message(v[1]) * as_message(v[2]))
-
 function initialize!(cache::EqualityChainCacheStrategy, randomvar::RandomVariable)
     nconnections = degree(randomvar)
 
@@ -116,6 +107,10 @@ function initialize!(cache::EqualityChainCacheStrategy, randomvar::RandomVariabl
 
     for i in 1:nconnections - 2
         cache.eq_nodes[i] = EqualityNode()
+    end
+
+    output_eq = let prod_parametrisation = prod_parametrisation(randomvar)
+        (stream1, stream2) -> combineLatest((stream1, stream2), PushNew()) |> map(AbstractMessage, (v) -> prod(prod_parametrisation, v[1], v[2]))
     end
 
     # First Equality node
@@ -167,8 +162,8 @@ end
 
 ##
 
-inbound_portal(randomvar::RandomVariable)          = randomvar.props.portal
-inbound_portal!(randomvar::RandomVariable, portal) = randomvar.props.portal = portal
+inbound_portal(randomvar::RandomVariable)          = randomvar.portal
+inbound_portal!(randomvar::RandomVariable, portal) = randomvar.portal = portal
 
 _getmarginal(randomvar::RandomVariable)                                = randomvar.props.marginal
 _setmarginal!(randomvar::RandomVariable, marginal::MarginalObservable) = randomvar.props.marginal = marginal

@@ -1,12 +1,14 @@
 import SpecialFunctions: loggamma
+using Distributions
+using Optim
 
 """
-    ν(x) ∝ exp(p*β*x - π*logГ(x)) ≡ exp(γ*x - p*logГ(x))
+    ν(x) ∝ exp(p*β*x - p*logГ(x)) ≡ exp(γ*x - p*logГ(x))
 """
 struct GammaShapeLikelihood{T <: Real, A}
     p :: T
     γ :: T # p * β
-    
+
     approximation :: A
 end
 
@@ -49,8 +51,21 @@ function approximate_prod_expectations(approximation::GaussLaguerreQuadrature, l
     # calculate variance
     v = approximate(approximation, vf)
 
-    return logC, m, v
+    return m, v
 end
+
+function approximate_prod_expectations(approximation::ImportanceSamplingApproximation, left::GammaDistributionsFamily, right::GammaShapeLikelihood)
+ 
+    f = let p = right.p, γ = right.γ
+        x -> exp(γ * x - p * loggamma(x))
+    end
+
+    m, v = approximate_meancov(approximation, f, GammaShapeScale(shape(left), scale(left)))
+
+    return m, v
+end
+
+# Preserve Gamma Distribution
 
 function prod(::ProdPreserveParametrisation, left::GammaShapeLikelihood, right::GammaShapeLikelihood)
     @assert left.approximation == right.approximation "Different approximation types for $(left) and $(right) messages"
@@ -62,10 +77,36 @@ function prod(::ProdPreserveParametrisation, left::GammaShapeLikelihood, right::
 end
 
 function prod(::ProdPreserveParametrisation, left::GammaDistributionsFamily, right::GammaShapeLikelihood)
-    _, m, v = approximate_prod_expectations(right.approximation, left, right)
+    m, v = approximate_prod_expectations(right.approximation, left, right)
 
     a = m ^ 2 / v
     b = m / v
 
     return GammaShapeRate(a, b)
+end
+
+# Expectation maximisation
+
+function prod(::ProdExpectationMaximisation, left::GammaShapeLikelihood, right::GammaShapeLikelihood)
+    @assert left.approximation == right.approximation "Different approximation types for $(left) and $(right) messages"
+    return GammaShapeLikelihood(left.p + right.p, left.γ + right.γ, left.approximation)
+end
+
+function prod(::ProdExpectationMaximisation, left::GammaShapeLikelihood, right::GammaDistributionsFamily)
+    return prod(ProdExpectationMaximisation(), right, left)
+end
+
+function prod(::ProdExpectationMaximisation, left::GammaDistributionsFamily, right::GammaShapeLikelihood)
+
+    a, b = shape(left), rate(left)
+    γ, p = right.γ, right.p
+
+    f(x) = (a-1)*log(x[1]) - b*x[1] + γ*x[1] - p*loggamma(x[1]) - loggamma(a) + a*log(b)
+
+    x_0 = [ mean(left) ]
+    res = optimize(x -> -f(x), [ 0.0 ], [ Inf ], x_0, Fminbox(GradientDescent()))
+
+    â = Optim.minimizer(res)[1]
+
+    return PointMass(â)
 end

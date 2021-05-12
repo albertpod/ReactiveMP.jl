@@ -1,4 +1,5 @@
 export AbstractVariable, degree
+export ClampedVariable, Marginalisation, ExpectationMaximisation, EM
 export RandomVariable, randomvar
 export SimpleRandomVariable, simplerandomvar
 export ConstVariable, constvar
@@ -10,13 +11,39 @@ using Rocket
 
 abstract type AbstractVariable end
 
-function degree end
+## Variable constraints
+
+abstract type AbstractVariableConstraint end
+
+struct ClampedVariable         <: AbstractVariableConstraint end
+struct Marginalisation         <: AbstractVariableConstraint end
+struct ExpectationMaximisation <: AbstractVariableConstraint end
+
+const EM = ExpectationMaximisation
+
+is_clamped(variable::AbstractVariable)   = is_clamped(constraint(variable))
+is_clamped(::AbstractVariableConstraint) = false
+is_clamped(::ClampedVariable)            = true
+
+is_marginalisation_constrained(variable::AbstractVariable)   = is_marginalisation_constrained(constraint(variable))
+is_marginalisation_constrained(::AbstractVariableConstraint) = false
+is_marginalisation_constrained(::Marginalisation)            = true
+
+is_expectation_maximisation_constrained(variable::AbstractVariable)   = is_expectation_maximisation_constrained(constraint(variable))
+is_expectation_maximisation_constrained(::AbstractVariableConstraint) = false
+is_expectation_maximisation_constrained(::ExpectationMaximisation)    = true
+
+prod_parametrisation(::Marginalisation)         = ProdPreserveParametrisation()
+prod_parametrisation(::ExpectationMaximisation) = ProdExpectationMaximisation()
 
 ## Common functions
 
+function degree end
+
 inbound_portal!(variable::AbstractVariable, portal) = error("Its not possible to change an inbound portal for $(variable)")
 
-getmarginals(vector::AbstractVector{ <: AbstractVariable }) = collectLatest(map(getmarginal, vector))
+# Helper functions
+# Getters
 
 getmarginal(variable::AbstractVariable) = getmarginal(variable, SkipInitial())
 
@@ -29,18 +56,26 @@ function getmarginal(variable::AbstractVariable, skip_strategy::MarginalSkipStra
     return as_marginal_observable(vmarginal, skip_strategy)
 end
 
+getmarginals(variables::AbstractArray{ <: AbstractVariable })                                      = getmarginals(variables, SkipInitial())
+getmarginals(variables::AbstractArray{ <: AbstractVariable }, skip_strategy::MarginalSkipStrategy) = collectLatest(map(v -> getmarginal(v, skip_strategy), variables))
+
+# Setters
+
 function setmarginal!(variable::AbstractVariable, marginal)
     setmarginal!(getmarginal(variable, IncludeAll()), marginal)
 end
 
-function setmarginals!(variables::AbstractVector{ <: AbstractVariable }, marginal)
-    setmarginals!(variables, Iterators.repeated(marginal, length(variables)))
-end
+setmarginals!(variables::AbstractArray{ <: AbstractVariable }, marginal::Distribution)    = _setmarginals!(Base.HasLength(), variables, Iterators.repeated(marginal, length(variables)))
+setmarginals!(variables::AbstractArray{ <: AbstractVariable }, marginals)                 = _setmarginals!(Base.IteratorSize(marginals), variables, marginals)
 
-function setmarginals!(variables::AbstractVector{ <: AbstractVariable }, marginals::AbstractVector)
+function _setmarginals!(::Base.IteratorSize, variables::AbstractArray{ <: AbstractVariable }, marginals)
     foreach(zip(variables, marginals)) do (variable, marginal)
         setmarginal!(getmarginal(variable, IncludeAll()), marginal)
     end
+end
+
+function _setmarginals!(::Any, variables::AbstractArray{ <: AbstractVariable }, marginals)
+    error("setmarginals!() failed. Default value is neither an iterable object nor a distribution.")
 end
 
 function name(variable::AbstractVariable)

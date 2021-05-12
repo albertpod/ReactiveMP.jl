@@ -32,7 +32,11 @@ function score(::Type{T}, objective::BetheFreeEnergy, model, scheduler) where { 
     node_bound_free_energies_sum = collectLatest(T, T, node_bound_free_energies, reduce_with_sum)
     variable_bound_entropies_sum = collectLatest(T, T, variable_bound_entropies, reduce_with_sum)
 
-    point_entropies = Infinity(mapreduce(degree, +, getdata(model), init = 0) + mapreduce(degree, +, getconstant(model), init = 0))
+    data_point_entropies_n     = mapreduce(degree, +, getdata(model), init = 0)
+    constant_point_entropies_n = mapreduce(degree, +, getconstant(model), init = 0)
+    em_point_entropies_n       = length(filter(is_expectation_maximisation_constrained, getrandom(model)))
+
+    point_entropies = Infinity(data_point_entropies_n + constant_point_entropies_n + em_point_entropies_n)
 
     return combineLatest((node_bound_free_energies_sum, variable_bound_entropies_sum), PushNew()) |> map(eltype(T), d -> float(d[1] + d[2] - point_entropies))
 end
@@ -68,10 +72,10 @@ end
 import .MacroHelpers
 
 macro average_energy(fformtype, lambda)
-    @capture(lambda, (args_ where { whereargs__ } = body_) | (args_ = body_)) || 
+    @capture(lambda, (args_ where { whereargs__ } = body_) | (args_ = body_)) ||
         error("Error in macro. Lambda body specification is incorrect")
 
-    @capture(args, (inputs__, meta::metatype_) | (inputs__, )) || 
+    @capture(args, (inputs__, meta::metatype_) | (inputs__, )) ||
         error("Error in macro. Lambda body arguments speicifcation is incorrect")
 
     fuppertype = MacroHelpers.upper_type(fformtype)
@@ -84,7 +88,7 @@ macro average_energy(fformtype, lambda)
     end
 
     q_names, q_types, q_init_block = rule_macro_parse_fn_args(inputs; specname = :marginals, prefix = :q_, proxy = :Marginal)
-    
+
     result = quote
         function ReactiveMP.score(
             ::AverageEnergy,
@@ -97,6 +101,6 @@ macro average_energy(fformtype, lambda)
             $(body)
         end
     end
-    
+
     return esc(result)
 end
