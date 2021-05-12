@@ -149,11 +149,11 @@ function _makemarginal(cache::EqualityChainCacheStrategy, randomvar::RandomVaria
 end
 
 function _makemarginal(::FoldLeftProdStrategy, cache::EqualityChainCacheStrategy, randomvar::RandomVariable)
-    return combineLatest((m_right(cache, degree(randomvar) - 2), messagein(randomvar, degree(randomvar))), PushNew()) |> map(Marginal, (v) -> as_marginal(as_message(v[1]) * as_message(v[2])))
+    return combineLatest((m_right(cache, degree(randomvar) - 2), messagein(randomvar, degree(randomvar))), PushNew()) |> map(Marginal, strategy_fn(prod_strategy(randomvar), prod_parametrisation(randomvar)))
 end
 
 function _makemarginal(::FoldRightProdStrategy, cache::EqualityChainCacheStrategy, randomvar::RandomVariable)
-    return combineLatest((messagein(randomvar, 1), m_left(cache, 1)), PushNew()) |> map(Marginal, (v) -> as_marginal(as_message(v[1]) * as_message(v[2])))
+    return combineLatest((messagein(randomvar, 1), m_left(cache, 1)), PushNew()) |> map(Marginal, strategy_fn(prod_strategy(randomvar), prod_parametrisation(randomvar)))
 end
 
 function _makemarginal(::AllAtOnceProdStrategy, cache::EqualityChainCacheStrategy, randomvar::RandomVariable)
