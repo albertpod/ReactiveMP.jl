@@ -1,18 +1,51 @@
 module ReactiveMPTest
 
-using Test, Documenter, ReactiveMP
+## https://discourse.julialang.org/t/generation-of-documentation-fails-qt-qpa-xcb-could-not-connect-to-display/60988
+## https://gr-framework.org/workstations.html#no-output
+ENV["GKSwstype"] = "100"
+
+using Test, Documenter, ReactiveMP, Distributions
 using TestSetExtensions
-
 using Aqua
-Aqua.test_all(ReactiveMP; ambiguities=false)
 
-include("test_helpers.jl")
+# DocMeta.setdocmeta!(ReactiveMP, :DocTestSetup, :(using ReactiveMP, Distributions); recursive=true)
 
-using .ReactiveMPTestingHelpers
+# Example usage of a reduced testset
+# julia --project --color=yes -e 'import Pkg; Pkg.test(test_args = [ "distributions:normal_mean_variance" ])'
 
-# doctest(ReactiveMP)
+enabled_tests = lowercase.(ARGS)
+
+if isempty(enabled_tests)
+    println("Running all tests...")
+    Aqua.test_all(ReactiveMP; ambiguities=false)
+    # doctest(ReactiveMP)
+else 
+    println("Running specific tests: $enabled_tests")
+end
 
 @testset ExtendedTestSet "ReactiveMP" begin
+
+    function key_to_filename(key)
+        splitted = split(key, ":")
+        return length(splitted) === 1 ? string("test_", first(splitted), ".jl") : string(join(splitted[1:end - 1], "/"), "/test_", splitted[end], ".jl")
+    end
+
+    function filename_to_key(filename)
+        splitted   = split(filename, "/")
+        if length(splitted) === 1
+            return replace(replace(first(splitted), ".jl" => ""), "test_" => "")
+        else
+            path, name = splitted[1:end - 1], splitted[end]
+            return string(join(path, ":"), ":", replace(replace(name, ".jl" => ""), "test_" => ""))
+        end
+    end
+
+    function addtests(filename)
+        key = filename_to_key(filename)
+        if isempty(enabled_tests) || key in enabled_tests
+            include(filename)
+        end
+    end
 
     @testset "Testset helpers" begin
         @test key_to_filename(filename_to_key("distributions/test_normal_mean_variance.jl")) == "distributions/test_normal_mean_variance.jl"
@@ -26,6 +59,7 @@ using .ReactiveMPTestingHelpers
     addtests("algebra/test_permutation_matrix.jl")
 
     addtests("test_math.jl")
+    addtests("test_helpers.jl")
 
     addtests("constraints/prod/test_prod_final.jl")
 
@@ -114,6 +148,12 @@ using .ReactiveMPTestingHelpers
 
     addtests("rules/wishart/test_marginals.jl")
     addtests("rules/wishart/test_out.jl")
+
+    addtests("models/test_lgssm.jl")
+    addtests("models/test_hgf.jl")
+    addtests("models/test_ar.jl")
+    addtests("models/test_gmm.jl")
+    addtests("models/test_hmm.jl")
 
 end
 
