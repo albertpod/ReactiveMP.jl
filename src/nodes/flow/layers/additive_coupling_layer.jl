@@ -1,5 +1,4 @@
-## TODO: expand to arbitrarily sized inputs
-## TODO: simplify forward function through forward! (etc...)
+## TODO: fix for non-unity partition dimensions
 
 export AdditiveCouplingLayer
 export getf, getflow, getdim
@@ -43,12 +42,12 @@ This layer structure has been introduced in:
 
 Dinh, Laurent, David Krueger, and Yoshua Bengio. "Nice: Non-linear independent components estimation." _arXiv preprint_ arXiv:1410.8516 (2014).
 """
-struct AdditiveCouplingLayer{T <: AbstractCouplingFlow} <: AbstractCouplingLayer
+struct AdditiveCouplingLayer{ T <: NTuple{N,AbstractCouplingFlow} where { N } } <: AbstractCouplingLayer
     dim           :: Int
     f             :: T
     partition_dim :: Int
 end
-struct AdditiveCouplingLayerEmpty{T <: AbstractCouplingFlowEmpty} <: AbstractCouplingLayer
+struct AdditiveCouplingLayerEmpty{ T <: NTuple{N,AbstractCouplingFlowEmpty} where { N } } <: AbstractCouplingLayer
     dim           :: Int
     f             :: T
     partition_dim :: Int
@@ -59,47 +58,61 @@ struct AdditiveCouplingLayerPlaceholder{T <: AbstractCouplingFlowEmpty, B } <: A
     permute       :: Val{B}
 end
 function AdditiveCouplingLayer(flow::T; partition_dim::Int=1, permute::Bool=true) where { T <: AbstractCouplingFlowPlaceholder }
-    ## TODO: generalize for arbitrary inputs
     return AdditiveCouplingLayerPlaceholder(prepare(partition_dim, flow), partition_dim, Val(permute))
 end
 
 # include permute as value type for type stability
 function _prepare(dim::Int, layer::AdditiveCouplingLayerPlaceholder{T, true}) where { T } 
-    return AdditiveCouplingLayerEmpty(dim, layer.f, layer.partition_dim), PermutationLayer(dim)
+    ## TODO: generalize for non-1 partition dim and overlap
+    @assert dim % getpartitiondim(layer) == 0 "The input dimensionality is not exactly divisible by the partition dimension."
+    nr_maps = ( dim ÷ getpartitiondim(layer) ) - 1
+    maps = ntuple((x) -> getf(layer), Val(nr_maps))
+    return AdditiveCouplingLayerEmpty(dim, maps, getpartitiondim(layer)), PermutationLayer(dim)
 end
 function _prepare(dim::Int, layer::AdditiveCouplingLayerPlaceholder{T, false}) where { T } 
-    return AdditiveCouplingLayerEmpty(dim, layer.f, layer.partition_dim)
+    ## TODO: generalize for non-1 partition dim and overlap
+    @assert dim % getpartitiondim(layer) == 0 "The input dimensionality is not exactly divisible by the partition dimension."
+    nr_maps = ( dim ÷ getpartitiondim(layer) ) - 1
+    maps = ntuple((x) -> getf(layer), Val(nr_maps))
+    return AdditiveCouplingLayerEmpty(dim, maps, getpartitiondim(layer))
 end
 
-# compile layer # TODO: fix for multiple mappings
-compile(layer::AdditiveCouplingLayerEmpty)          = AdditiveCouplingLayer(layer.dim, compile(layer.f), layer.partition_dim)
-compile(layer::AdditiveCouplingLayerEmpty, params)  = AdditiveCouplingLayer(layer.dim, compile(layer.f, params), layer.partition_dim)
+# compile layer (tuples are compiled according to compile in flow_model.jl)
+compile(layer::AdditiveCouplingLayerEmpty)          = AdditiveCouplingLayer(getdim(layer), compile(getf(layer)), getpartitiondim(layer))
+compile(layer::AdditiveCouplingLayerEmpty, params)  = AdditiveCouplingLayer(getdim(layer), compile(getf(layer), params), getpartitiondim(layer))
 
-# TODO fix according to nr of flows
-nr_params(layer::AdditiveCouplingLayer)             = nr_params(layer.f)
-nr_params(layer::AdditiveCouplingLayerPlaceholder)  = nr_params(layer.f)
-nr_params(layer::AdditiveCouplingLayerEmpty)        = nr_params(layer.f)
+# calculates the number of parameters in the model
+nr_params(layer::AdditiveCouplingLayer)             = mapreduce(nr_params, +, getf(layer))
+nr_params(layer::AdditiveCouplingLayerEmpty)        = mapreduce(nr_params, +, getf(layer))
 
 # get-functions for the AdditiveCouplingLayer structure
-getf(layer::AdditiveCouplingLayer)      = layer.f
-getflow(layer::AdditiveCouplingLayer)   = layer.f
-getdim(layer::AdditiveCouplingLayer)    = layer.dim
+getf(layer::AdditiveCouplingLayer)              = layer.f
+getflow(layer::AdditiveCouplingLayer)           = layer.f
+getdim(layer::AdditiveCouplingLayer)            = layer.dim
+getpartitiondim(layer::AdditiveCouplingLayer)   = layer.partition_dim
+
+# get-functions for the AdditiveCouplingLayerPlaceholder structure
+getf(layer::AdditiveCouplingLayerPlaceholder)               = layer.f
+getflow(layer::AdditiveCouplingLayerPlaceholder)            = layer.f
+getpartitiondim(layer::AdditiveCouplingLayerPlaceholder)    = layer.partition_dim
+
+# get-functions for the AdditiveCouplingLayerEmpty structure
+getdim(layer::AdditiveCouplingLayerEmpty)           = layer.dim
+getf(layer::AdditiveCouplingLayerEmpty)             = layer.f
+getflow(layer::AdditiveCouplingLayerEmpty)          = layer.f
+getpartitiondim(layer::AdditiveCouplingLayerEmpty)  = layer.partition_dim
 
 # custom Base function for the AdditiveCouplingLayer structure
-eltype(layer::AdditiveCouplingLayer{T})  where { T }              = eltype(T)
-eltype(::Type{AdditiveCouplingLayer{T}}) where { T }              = eltype(T)
+eltype(layer::AdditiveCouplingLayer{T})  where { T }              = promote_type(map(eltype, getf(layer))...)
 
 # forward pass through the additive coupling layer
 function _forward(layer::AdditiveCouplingLayer, input::Array{T,1}) where { T <: Real } 
 
-    # check dimensionality
-    @assert length(input) == 2 "The AdditiveCouplingLayer currently only supports 2 dimensional inputs and outputs."
+    # allocate result
+    result = similar(input)
 
-    # fetch variables
-    f = getf(layer)
-
-    # determine result
-    result = [input[1], input[2] + forward(f, input[1])]
+    # calculate result
+    forward!(result, layer, input)
 
     # return result
     return result
@@ -111,30 +124,39 @@ Broadcast.broadcasted(::typeof(forward), layer::AdditiveCouplingLayer, input::Ar
 # inplace forward pass through the additive coupling layer
 function forward!(output::Array{T1,1}, layer::AdditiveCouplingLayer, input::Array{T2,1}) where { T1 <: Real, T2 <: Real }
 
-    # check dimensionality
-    @assert length(input) == 2 "The AdditiveCouplingLayer currently only supports 2 dimensional inputs and outputs."
-
     # fetch variables
     f = getf(layer)
+    dim = getdim(layer)
+    pdim = getpartitiondim(layer)
 
-    # determine result
-    output[1] = input[1] 
-    output[2] = input[2] 
-    output[2] += forward(f, input[1])
+    # check dimensionality
+    @assert length(input) == dim "The dimensionality of the AdditiveCouplingLayer does not correspond to the length of the passed input/output."
+
+    # optimized version for scalar partition dimension
+    if pdim == 1 
+        output[1] = input[1]
+        for k = 2:dim
+            output[k] = input[k]
+            output[k] += forward(f[k-1], input[k-1])
+        end
+    else
+        view(output, 1:pdim) .= view(input, 1:pdim) 
+        for k = 2:dim÷pdim
+            view(output, 1+(k-1)*pdim:k*pdim) .= view(input, 1+(k-1)*pdim:k*pdim)
+            view(output, 1+(k-1)*pdim:k*pdim) .+= forward(f[k-1], view(input, 1+(k-2)*pdim:(k-1)*pdim))
+        end
+    end
     
 end
 
 # backward pass through the additive coupling layer
 function _backward(layer::AdditiveCouplingLayer, output::Array{T,1}) where { T <: Real }
 
-    # check dimensionality
-    @assert length(output) == 2 "The AdditiveCouplingLayer currently only supports 2 dimensional inputs and outputs."
+    # allocate result
+    result = similar(output)
 
-    # fetch variables
-    f = getf(layer)
-
-    # determine result
-    result = [output[1], output[2] - forward(f, output[1])]
+    # calculate result
+    backward!(result, layer, output)
 
     # return result
     return result
@@ -146,35 +168,43 @@ Broadcast.broadcasted(::typeof(backward), layer::AdditiveCouplingLayer, output::
 # inplace backward pass through the additive coupling layer
 function backward!(input::Array{T1,1}, layer::AdditiveCouplingLayer, output::Array{T2,1}) where { T1 <: Real, T2 <: Real }
 
-    # check dimensionality
-    @assert length(output) == 2 "The AdditiveCouplingLayer currently only supports 2 dimensional inputs and outputs."
-
     # fetch variables
     f = getf(layer)
+    dim = getdim(layer)
+    pdim = getpartitiondim(layer)
+
+    # check dimensionality
+    @assert length(input) == dim "The dimensionality of the AdditiveCouplingLayer does not correspond to the length of the passed input/output."
 
     # determine result
-    input[1] = output[1]
-    input[2] = output[2] - forward(f, output[1])
+    if pdim == 1
+        input[1] = output[1]
+        for k = 2:dim
+            input[k] = output[k]
+            input[k] -= forward(f[k-1], input[k-1])
+        end
+    else
+        view(input, 1:pdim) .= view(output, 1:pdim) 
+        for k = 2:dim÷pdim
+            view(input, 1+(k-1)*pdim:k*pdim) .= view(output, 1+(k-1)*pdim:k*pdim)
+            view(input, 1+(k-1)*pdim:k*pdim) .-= forward(f[k-1], view(input, 1+(k-2)*pdim:(k-1)*pdim))
+        end
+    end
     
 end
 
 # jacobian of the additive coupling layer
 function _jacobian(layer::AdditiveCouplingLayer, input::Array{T1,1}) where { T1 <: Real }
 
-    # check dimensionality
-    @assert length(input) == 2 "The AdditiveCouplingLayer currently only supports 2 dimensional inputs and outputs."
-
     # fetch variables
-    f = getf(layer)
+    dim = getdim(layer)
 
-    # promote type for allocating output
+    # allocate jacobian
     T = promote_type(eltype(layer), T1)
+    result = zeros(T, dim, dim)
 
     # determine result  
-    result = zeros(T, 2, 2)
-    result[1,1] = 1.0
-    result[2,1] = jacobian(f, input[1])
-    result[2,2] = 1.0
+    jacobian!(result, layer, input)
     
     # return result
     return LowerTriangular(result)
@@ -183,23 +213,41 @@ end
 jacobian(layer::AdditiveCouplingLayer, input::Array{T,1}) where { T <: Real } = _jacobian(layer, input)
 Broadcast.broadcasted(::typeof(jacobian), layer::AdditiveCouplingLayer, input::Array{Array{T,1},1}) where { T <: Real } = broadcast(_jacobian, Ref(layer), input)
 
-# inverse jacobian of the additive coupling layer
-function _inv_jacobian(layer::AdditiveCouplingLayer, output::Array{T1,1}) where { T1 <: Real }
-
-    # check dimensionality
-    @assert length(output) == 2 "The AdditiveCouplingLayer currently only supports 2 dimensional inputs and outputs."
+# inplace jacobian through the additive coupling layer
+function jacobian!(result::Array{T1,2}, layer::AdditiveCouplingLayer, input::Array{T2,1}) where { T1 <: Real, T2 <: Real }
 
     # fetch variables
     f = getf(layer)
+    dim = getdim(layer)
+    pdim = getpartitiondim(layer)
 
-    # promote type for allocating output
-    T = promote_type(eltype(layer), T1)
+    # check dimensionality
+    @assert length(input) == dim "The dimensionality of the AdditiveCouplingLayer does not correspond to the length of the passed input/output."
 
     # determine result
-    result = zeros(T, 2, 2)
-    result[1,1] = 1.0
-    result[2,1] = -jacobian(f,output[1])
-    result[2,2] = 1.0
+    result .= 0.0
+    for k = 1:dim÷pdim
+        result[k,k] = 1.0
+    end
+    for k = 1:dim÷pdim-1
+        result[1+k*pdim:(k+1)*pdim, 1+(k-1)*pdim:k*pdim] .+= jacobian(f[k], input[1+(k-1)*pdim:k*pdim])
+    end
+    
+end
+
+
+# inverse jacobian of the additive coupling layer
+function _inv_jacobian(layer::AdditiveCouplingLayer, output::Array{T1,1}) where { T1 <: Real }
+
+    # fetch variables
+    dim = getdim(layer)
+
+    # allocate jacobian
+    T = promote_type(eltype(layer), T1)
+    result = zeros(T, dim, dim)
+
+    # determine result  
+    inv_jacobian!(result, layer, output)
     
     # return result
     return LowerTriangular(result)
@@ -207,6 +255,32 @@ function _inv_jacobian(layer::AdditiveCouplingLayer, output::Array{T1,1}) where 
 end
 inv_jacobian(layer::AdditiveCouplingLayer, output::Array{T,1}) where { T <: Real } = _inv_jacobian(layer, output)
 Broadcast.broadcasted(::typeof(inv_jacobian), layer::AdditiveCouplingLayer, output::Array{Array{T,1},1}) where { T <: Real } = broadcast(_inv_jacobian, Ref(layer), output)
+
+# inplace inv_jacobian through the additive coupling layer
+function inv_jacobian!(result::Array{T1,2}, layer::AdditiveCouplingLayer, output::Array{T2,1}) where { T1 <: Real, T2 <: Real }
+
+    # fetch variables
+    f = getf(layer)
+    dim = getdim(layer)
+    pdim = getpartitiondim(layer)
+
+    # check dimensionality
+    @assert length(output) == dim "The dimensionality of the AdditiveCouplingLayer does not correspond to the length of the passed input/output."
+
+    # calculate input of layer for simpler jacobian calculation
+    input = backward(layer, output)
+
+    # determine result
+    result .= 0.0
+    for k = 1:dim÷pdim
+        result[k:end,k] .= 1.0
+    end
+    for k = 1:dim÷pdim-1
+        result[k+1:end, 1:k] .*= -jacobian(f[k], input[1+(k-1)*pdim:k*pdim])
+    end
+    
+end
+
 
 # extra utility functions 
 det_jacobian(layer::AdditiveCouplingLayer, input::Array{T,1})           where { T <: Real}   = 1.0

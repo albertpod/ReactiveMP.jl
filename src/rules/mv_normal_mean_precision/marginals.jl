@@ -8,11 +8,6 @@ end
     return (out = m_out, μ = prod(ProdAnalytical(), m_μ, MvNormalMeanPrecision(mean(m_out), mean(m_Λ))), Λ = m_Λ)
 end
 
-@marginalrule MvNormalMeanPrecision(:out_μ) (m_out::MvNormalMeanPrecision, m_μ::MvNormalMeanPrecision, q_Λ::Any) = begin
-    W_y  = invcov(m_out)
-    xi_y = W_y * mean(m_out)
-end
-
 @marginalrule MvNormalMeanPrecision(:out_μ_Λ) (m_out::MultivariateNormalDistributionsFamily, m_μ::MultivariateNormalDistributionsFamily, m_Λ::PointMass) = begin
     xi_y, W_y  = weightedmean_precision(m_out)
     xi_m, W_m  = weightedmean_precision(m_μ)

@@ -42,13 +42,15 @@ using ReactiveMP
         layer_comp  = compile(outf)
         layer_compp = compile(outf, [1.0, 2.0, 3.0])
         
-        @test typeof(layer_comp)    <: AdditiveCouplingLayer
-        @test typeof(layer_compp)   <: AdditiveCouplingLayer
-        @test typeof(layer_comp.f)  <: PlanarFlow
-        @test typeof(layer_compp.f) <: PlanarFlow
-        @test layer_compp.f.u       == 1.0
-        @test layer_compp.f.w       == 2.0
-        @test layer_compp.f.b       == 3.0
+        @test typeof(layer_comp)        <: AdditiveCouplingLayer
+        @test typeof(layer_compp)       <: AdditiveCouplingLayer
+        @test typeof(layer_comp.f)      <: Tuple
+        @test typeof(layer_comp.f[1])   <: PlanarFlow
+        @test typeof(layer_compp.f)     <: Tuple
+        @test typeof(layer_compp.f[1])  <: PlanarFlow
+        @test layer_compp.f[1].u        == 1.0
+        @test layer_compp.f[1].w        == 2.0
+        @test layer_compp.f[1].b        == 3.0
 
         # TODO expend for multiple mappings
         @test nr_params(outf)       == 3
@@ -76,7 +78,6 @@ using ReactiveMP
         layer = AdditiveCouplingLayer(f; permute=false)
         out = compile(ReactiveMP._prepare(2, layer))
         @test eltype(out) == Float64
-        @test eltype(AdditiveCouplingLayer{PlanarFlow{Float64,Float64}}) == Float64
 
     end
 
@@ -101,6 +102,13 @@ using ReactiveMP
         @test output == [5.0, 7.4999983369439445]
         forward!(output, layer, [4.0, 2.5]) 
         @test output == [4.0, 7.499909204262595]
+
+        # check forward function (input > 2)
+        f  = PlanarFlow()
+        layer = AdditiveCouplingLayer(f; permute=false)
+        layer = compile(ReactiveMP._prepare(3, layer))
+        x = randn(3)
+        @test backward(layer, forward(layer, x)) ≈ x
 
         # check backward function
         params = [1.0, 2.0, -3.0]
@@ -143,6 +151,12 @@ using ReactiveMP
         @test inv_jacobian(layer, [3.0, 1.5]) == [1.0 0.0; -1.0197320743308804 1.0]
         @test inv_jacobian(layer, [2.5, 5.0]) == [1.0 0.0; -1.1413016497063289 1.0]
         @test inv_jacobian.(layer, [[3.0, 1.5], [2.5, 5.0]]) == [[1.0 0.0; -1.0197320743308804 1.0], [1.0 0.0; -1.1413016497063289 1.0]]        
+
+        # check for invertibility 
+        layer = AdditiveCouplingLayer(PlanarFlow(); permute=false)
+        x = randn(10)
+        layer = compile(ReactiveMP._prepare(10, layer))
+        @test inv(jacobian(layer, x)) ≈ inv_jacobian(layer, forward(layer, x))
 
     end
 

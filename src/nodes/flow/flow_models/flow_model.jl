@@ -1,9 +1,7 @@
-## TODO: create a forward-jacobian joint function that calculates both at the same time
-## TODO: simplify forward function through forward! (etc...)
-
 export FlowModel, CompiledFlowModel
 export compile, nr_params
 export getlayers, getforward, getbackward, getjacobian, getinv_jacobian
+export forward_jacobian, backward_inv_jacobian
 export forward, forward!, backward, backward!
 export jacobian, jacobian!, inv_jacobian, inv_jacobian!
 export det_jacobian, absdet_jacobian, logdet_jacobian, logabsdet_jacobian
@@ -34,14 +32,14 @@ Return arguments:
 function FlowModel(dim::Int, layers::T) where { T <: NTuple{N,AbstractLayerPlaceholder} where { N } }
     return FlowModel(dim, flatten_tuple(prepare.(dim, layers)))
 end
-function FlowModel(layers::T) where { T <: NTuple{N, AbstractLayerPlaceholder} where { N } }
+function FlowModel(layers::T) where { T <: NTuple{N, Union{AbstractLayer, AbstractLayerPlaceholder}} where { N } }
     @assert typeof(first(layers)) <: InputLayer "The FlowModel requires an input dimension to be specified. This can be achieved, either by preceding the layers tuple with an integer as `FlowModel(dim, layers)`, or by starting the tuple of layers with an `InputLayer(dim)` as `FlowModel((InputLayer(dim), layers...))`."
     return FlowModel(getdim(first(layers)), flatten_tuple(prepare.(getdim(first(layers)), Base.tail(layers))))
 end
 
 # prepare function for setting correct sizes in the layers (without assigning the parameters yet!)
-prepare(dim::Int, layers::T) where { T <: NTuple{N,AbstractLayerPlaceholder} where { N }} = _prepare(dim, layers)
-Broadcast.broadcasted(::typeof(prepare), dim::Int, layers::T) where { T <: NTuple{N,AbstractLayerPlaceholder} where { N }} = broadcast(_prepare, Ref(dim), layers)
+prepare(dim::Int, layers::T) where { T <: NTuple{N,Union{AbstractLayer, AbstractLayerPlaceholder}} where { N }} = _prepare(dim, layers)
+Broadcast.broadcasted(::typeof(prepare), dim::Int, layers::T) where { T <: NTuple{N,Union{AbstractLayer, AbstractLayerPlaceholder}} where { N }} = broadcast(_prepare, Ref(dim), layers)
 
 @doc raw"""
 The CompiledFlowModel structure is the most generic type of compiled Flow model, in which the layers are not constrained to be of a specific type. The FlowModel structure contains the input dimension and a tuple of compiled layers. Do not manually create a CompiledFlowModel! Instead create a FlowModel first and compile it with `compile(model::FlowModel)`. This will make sure that all layers/mappings are configured with the proper dimensionality and with randomly sampled parameters. Alternatively, if you would like to pass your own parameters, call `compile(model::FlowModel, params::Vector)`.
@@ -100,6 +98,9 @@ function compile(x::Tuple, params::Vector)
     end
     
 end
+function compile(x::Tuple)
+    return (compile(first(x)), compile(Base.tail(x))...)
+end
 # compile functions to stop the recursion
 compile(x::Tuple{}, params::Vector) = ()
 compile(x::Tuple{})         = ()
@@ -122,37 +123,32 @@ length(model::CompiledFlowModel) = length(model.layers)
 nr_params(model::FlowModel)         = mapreduce(nr_params, +, model.layers)
 nr_params(model::CompiledFlowModel) = mapreduce(nr_params, +, model.layers)
 
-# forward pass through the Flow model
-function _forward(model::CompiledFlowModel, input::Array{T1,1}) where { T1 <: Real }
 
-    # fetch layers
-    layers = getlayers(model)
+# forward pass through the Flow model
+function _forward(model::CompiledFlowModel, input::Vector{T1}) where { T1 <: Real }
 
     # promote type for allocating output
     T = promote_type(eltype(model), T1)
 
     # allocate space for result
-    input_new = zeros(T, size(input))
-    input_new .= input
     output = zeros(T, size(input))
-    
-    # pass result along the graph
-    for k = 1:length(layers)
-        forward!(output, layers[k], input_new)
-        if k < length(layers)
-            input_new .= output
-        end
-    end
+
+    # perform calculations 
+    forward!(output, model, input)
 
     # return result
     return output
     
 end
-forward(model::CompiledFlowModel, input::Array{T,1}) where { T <: Real } = _forward(model, input)
-Broadcast.broadcasted(::typeof(forward), model::CompiledFlowModel, input::Array{Array{T,1},1}) where { T <: Real } = broadcast(_forward, Ref(model), input)
+
+# when calling forward, redirect to _forward
+forward(model::CompiledFlowModel, input::Vector{T}) where { T <: Real } = _forward(model, input)
+
+# for broadcasting over forward, fix the model for multiple inputs
+Broadcast.broadcasted(::typeof(forward), model::CompiledFlowModel, input::Vector{Vector{T}}) where { T <: Real } = broadcast(_forward, Ref(model), input)
 
 # inplace forward pass through the Flow model
-function forward!(output::Array{T1,1}, model::CompiledFlowModel, input::Array{T2,1}) where { T1 <: Real, T2 <: Real }
+function forward!(output::Vector{T1}, model::CompiledFlowModel, input::Vector{T2}) where { T1 <: Real, T2 <: Real }
 
     # fetch layers
     layers = getlayers(model)
@@ -160,51 +156,58 @@ function forward!(output::Array{T1,1}, model::CompiledFlowModel, input::Array{T2
     # promote type for allocating output
     T = promote_type(eltype(model), T2)
 
-    # allocate space for result
+    # decouple changing input from actual input
     input_new = zeros(T, size(input))
     input_new .= input
-    
-    # pass result along the graph
-    for k = 1:length(layers)
-        forward!(output, layers[k], input_new)
-        if k < length(layers)
-            input_new .= output
-        end
-    end
+
+    # perform forward pass over all layers
+    forward!(output, layers, input_new)
     
 end
 
-# backward pass through the Flow model
-function _backward(model::CompiledFlowModel, output::Array{T1,1}) where { T1 <: Real }
+# inplace forward pass through a tuple of layers
+function forward!(output::Vector{T1}, layers::T, input::Vector{T2}) where { T1 <: Real, T2 <: Real,  T <: NTuple{N,AbstractLayer} where N}
 
-    # fetch layers
-    layers = getlayers(model)
+    # perform pass over first layer
+    forward!(output, first(layers), input)
+
+    # update intermediate input
+    input .= output
+
+    # perform pass over all remaining layers
+    forward!(output, Base.tail(layers), input)
+
+end
+
+# when no layers are left, stop the inplace recursion
+forward!(output::Vector{T1}, layers::Tuple{}, input::Vector{T2}) where { T1 <: Real, T2 <: Real } = return
+
+
+# backward pass through the Flow model
+function _backward(model::CompiledFlowModel, output::Vector{T1}) where { T1 <: Real }
 
     # promote type for allocating output
     T = promote_type(eltype(model), T1)
 
     # allocate space for result
-    output_new = zeros(T, size(output))
-    output_new .= output
     input = zeros(T, size(output))
-    
-    # pass result along the graph
-    for k = length(layers):-1:1
-        backward!(input, layers[k], output_new)
-        if k > 1
-            output_new .= input
-        end
-    end
+
+    # perform calculations 
+    backward!(input, model, output)
 
     # return result
     return input
     
 end
-backward(model::CompiledFlowModel, output::Array{T,1}) where { T <: Real } = _backward(model, output)
-Broadcast.broadcasted(::typeof(backward), model::CompiledFlowModel, output::Array{Array{T,1},1}) where { T <: Real } = broadcast(_backward, Ref(model), output)
+
+# when calling backward, redirect to _backward
+backward(model::CompiledFlowModel, output::Vector{T}) where { T <: Real } = _backward(model, output)
+
+# for broadcasting over backward, fix the model for multiple inputs
+Broadcast.broadcasted(::typeof(backward), model::CompiledFlowModel, output::Vector{Vector{T}}) where { T <: Real } = broadcast(_backward, Ref(model), output)
 
 # inplace backward pass through the Flow model
-function backward!(input::Array{T1,1}, model::CompiledFlowModel, output::Array{T2,1}) where { T1 <: Real, T2 <: Real }
+function backward!(input::Vector{T1}, model::CompiledFlowModel, output::Vector{T2}) where { T1 <: Real, T2 <: Real }
 
     # fetch layers
     layers = getlayers(model)
@@ -212,204 +215,317 @@ function backward!(input::Array{T1,1}, model::CompiledFlowModel, output::Array{T
     # promote type for allocating output
     T = promote_type(eltype(model), T2)
 
-    # allocate space for result
+    # decouple changing output from actual output
     output_new = zeros(T, size(output))
     output_new .= output
-    
-    # pass result along the graph
-    for k = length(layers):-1:1
-        backward!(input, layers[k], output_new)
-        if k > 1
-            output_new .= input
-        end
-    end
+
+    # perform backward pass over all layers
+    backward!(input, layers, output_new)
     
 end
 
-# jacobian of the Flow model
-function _jacobian(model::CompiledFlowModel, input::Array{T1,1}) where { T1 <: Real }
+# inplace backward pass through a tuple of layers
+function backward!(input::Vector{T1}, layers::T, output::Vector{T2}) where { T1 <: Real, T2 <: Real,  T <: NTuple{N,AbstractLayer} where N}
+
+    # perform pass over last layer
+    backward!(input, last(layers), output)
+
+    # update intermediate output
+    output .= input
+
+    # perform pass over all remaining layers
+    backward!(input, Base.front(layers), output)
+
+end
+
+# when no layers are left, stop the inplace recursion
+backward!(input::Vector{T1}, layers::Tuple{}, output::Vector{T2}) where { T1 <: Real, T2 <: Real } = return
+
+
+# joint forward-jacobian of the Flow model
+function _forward_jacobian(model::CompiledFlowModel, input::Vector{T1}) where { T1 <: Real }
 
     # fetch layers
-    layers = getlayers(model)
+    dim    = getdim(model)
     
     # promote type for allocating output
     T = promote_type(eltype(model), T1)
 
-    # allocate space for output
-    input_new = zeros(T, size(input))
-    input_new .= input
-    output = zeros(T, size(input))
-    J = zeros(T, 2, 2)
-    J[1,1] = 1.0
-    J[2,2] = 1.0
-    J_new = copy(J)
-
-    # pass result along the graph
-    for k = 1:length(layers)
-        
-        # calculate jacobian
-        mul!(J_new, jacobian(layers[k], input_new), J)
-
-        # perform forward pass and update inputs
-        if k < length(layers)
-            forward!(output, layers[k], input_new)
-            input_new .= output
-            J .= J_new
-        end
-
+    # allocate space for output and jacobian
+    output = zeros(T, dim)
+    J = zeros(T, dim, dim)
+    for k = 1:dim
+        J[k,k] = 1.0
     end
 
+    # calculate jacobian
+    forward_jacobian!(output, J, model, input)
+
     # return result
-    return J_new
+    return output, J
 
 end
-jacobian(model::CompiledFlowModel, input::Array{T,1}) where { T <: Real } = _jacobian(model, input)
-Broadcast.broadcasted(::typeof(jacobian), model::CompiledFlowModel, input::Array{Array{T,1},1}) where { T <: Real } = broadcast(_jacobian, Ref(model), input)
 
-# inplace jacobian of the Flow model
-function jacobian!(J_new::Array{T1,2}, model::CompiledFlowModel, input::Array{T2,1}) where { T1 <: Real, T2 <: Real }
+# when calling forward_jacobian, redirect to _forward_jacobian
+forward_jacobian(model::CompiledFlowModel, input::Vector{T}) where { T <: Real } = _forward_jacobian(model, input)
+
+# for broadcasting over forward_jacobian, fix the model for multiple inputs
+Broadcast.broadcasted(::typeof(forward_jacobian), model::CompiledFlowModel, input::Vector{Vector{T}}) where { T <: Real } = broadcast(_jacobian, Ref(model), input)
+
+# inplace forward_jacobian of the Flow model
+function forward_jacobian!(output::Vector{T1}, J::Matrix{T2}, model::CompiledFlowModel, input::Vector{T3}) where { T1 <: Real, T2 <: Real, T3 <: Real }
 
     # fetch layers
     layers = getlayers(model)
+    dim = getdim(model)
     
     # promote type for allocating output
     T = promote_type(eltype(model), T2)
 
-    # allocate space for output
-    input_new = zeros(T, size(input))
+    # allocate space for intermediate output and jacobian
+    input_new = zeros(T, dim)
     input_new .= input
-    output = zeros(T, size(input))
-    J = zeros(T, 2, 2)
-    J[1,1] = 1.0
-    J[2,2] = 1.0
-    J_new .= J
-
-    # pass result along the graph
-    for k = 1:length(layers)
-        
-        # calculate jacobian
-        mul!(J_new, jacobian(layers[k], input_new), J)
-
-        # perform forward pass and update inputs
-        if k < length(layers)
-            forward!(output, layers[k], input_new)
-            input_new .= output
-            J .= J_new
-        end
-
+    J_new = zeros(T, dim, dim)
+    J_old = zeros(T, dim, dim)
+    for k = 1:dim
+        J_old[k,k] = 1.0
     end
+
+    # calculate forward_jacobian over all layers
+    forward_jacobian!(J, J_new, J_old, output, input_new, layers)
 
 end
 
-# inverse jacobian of the Flow model
-function _inv_jacobian(model::CompiledFlowModel, output::Array{T1,1}) where { T1 <: Real }
+# inplace forward_jacobian calculation for a tuple of layers
+function forward_jacobian!(J::Matrix{T1}, J_new::Matrix{T2}, J_old::Matrix{T3}, output::Vector{T4}, input_new::Vector{T5}, layers::T) where { T1 <: Real, T2 <: Real,  T3 <: Real, T4 <: Real, T5 <: Real, T <: NTuple{N,AbstractLayer} where N}
+
+    # check for specialized jacobians that are fixed (e.g. Permutation Matrix)
+    if typeof(first(layers)) <: PermutationLayer
+
+        # calculate new output
+        forward!(output, first(layers), input_new)
+        
+        # calculate total jacobian
+        mul!(J, jacobian(first(layers), input_new), J_old)
+        
+    # else fall back to standard calculation
+    else 
+        
+        # calculate new jacobian
+        forward_jacobian!(output, J_new, first(layers), input_new)
+
+        # calculate total jacobian
+        mul!(J, J_new, J_old)
+        
+    end
+
+    # update unless we are on the last layer
+    if length(layers) > 1
+        
+        # update intermediate input
+        input_new .= output
+
+        # update old jacobian
+        J_old .= J
+
+    end
+
+    # calculate forward_jacobian of remaining layers
+    forward_jacobian!(J, J_new, J_old, output, input_new, Base.tail(layers))
+
+end
+
+# when no layers are left, stop the inplace recursion
+forward_jacobian!(J::Matrix{T1}, J_new::Matrix{T2}, J_old::Matrix{T3}, output::Vector{T4}, input_new::Vector{T5}, layers::Tuple{}) where { T1 <: Real, T2 <: Real,  T3 <: Real, T4 <: Real, T5 <: Real } = return
+
+
+# joing backward inverse jacobian of the Flow model
+function _backward_inv_jacobian(model::CompiledFlowModel, output::Vector{T1}) where { T1 <: Real }
 
     # fetch layers
-    layers = getlayers(model)
-
+    dim    = getdim(model)
+    
     # promote type for allocating output
     T = promote_type(eltype(model), T1)
 
-    # allocate space for output
-    output_new = zeros(T, size(output))
-    output_new .= output
-    input = zeros(T, size(output))
-    J = zeros(T, 2, 2)
-    J[1,1] = 1.0
-    J[2,2] = 1.0
-    J_new = copy(J)
-    
-    # pass result along the graph
-    for k = length(layers):-1:1
-
-        # calculate jacobian
-        mul!(J_new, inv_jacobian(layers[k], output_new), J)
-
-        # perform backward pass and update outputs
-        if k > 1
-            backward!(input, layers[k], output_new)
-            output_new .= input
-            J .= J_new
-        end
-
+    # allocate space for jacobian
+    J = zeros(T, dim, dim)
+    input = zeros(T, dim)
+    for k = 1:dim
+        J[k,k] = 1.0
     end
+
+    # calculate jacobian
+    backward_inv_jacobian!(input, J, model, output)
 
     # return result
-    return J_new
-    
-end
-inv_jacobian(model::CompiledFlowModel, output::Array{T,1}) where { T <: Real } = _inv_jacobian(model, output)
-Broadcast.broadcasted(::typeof(inv_jacobian), model::CompiledFlowModel, output::Array{Array{T,1},1}) where { T <: Real } = broadcast(_inv_jacobian, Ref(model), output)
+    return input, J
 
-# inplace inverse jacobian of the Flow model
-function inv_jacobian!(J_new::Array{T1,2}, model::CompiledFlowModel, output::Array{T2,1}) where { T1 <: Real, T2 <: Real }
-    
+end
+
+# when calling backward inverse jacobian, redirect to _backward_inv_jacobian
+backward_inv_jacobian(model::CompiledFlowModel, output::Vector{T}) where { T <: Real } = _backward_inv_jacobian(model, output)
+
+# for broadcasting over backward inverse jacobian, fix the model for multiple inputs
+Broadcast.broadcasted(::typeof(backward_inv_jacobian), model::CompiledFlowModel, output::Vector{Vector{T}}) where { T <: Real } = broadcast(_backward_inv_jacobian, Ref(model), output)
+
+# inplace inverse backward jacobian of the Flow model
+function backward_inv_jacobian!(input::Vector{T1}, J::Matrix{T2}, model::CompiledFlowModel, output::Vector{T3}) where { T1 <: Real, T2 <: Real, T3 <: Real }
+
     # fetch layers
     layers = getlayers(model)
-
+    dim = getdim(model)
+    
     # promote type for allocating output
     T = promote_type(eltype(model), T2)
-    
-    # allocate space for output
-    output_new = zeros(T, size(output))
+
+    # allocate space for intermediate output and jacobian
+    output_new = zeros(T, dim)
     output_new .= output
-    input = zeros(T, size(output))
-    J = zeros(T, 2, 2)
-    J[1,1] = 1.0
-    J[2,2] = 1.0
-    J_new .= J
-    
-    # pass result along the graph
-    for k = length(layers):-1:1
+    J_new = zeros(T, dim, dim)
+    J_old = zeros(T, dim, dim)
+    for k = 1:dim
+        J_old[k,k] = 1.0
+    end
+
+    # calculate backward inverse jacobian over all layers
+    backward_inv_jacobian!(J, J_new, J_old, input, output_new, layers)
+
+end
+
+# inplace backward inverse jacobian calculation for a tuple of layers
+function backward_inv_jacobian!(J::Matrix{T1}, J_new::Matrix{T2}, J_old::Matrix{T3}, input::Vector{T4}, output_new::Vector{T5}, layers::T) where { T1 <: Real, T2 <: Real,  T3 <: Real, T4 <: Real, T5 <: Real, T <: NTuple{N,AbstractLayer} where N}
+
+    # check for specialized jacobians that are fixed (e.g. Permutation Matrix)
+    if typeof(last(layers)) <: PermutationLayer
+
+        # perform forward pass over last layer
+        backward!(input, last(layers), output_new)
         
-        # calculate jacobian
-        mul!(J_new, inv_jacobian(layers[k], output_new), J)
+        # calculate total jacobian
+        mul!(J, inv_jacobian(last(layers), output_new), J_old)
         
-        # perform backward pass and update outputs
-        if k > 1
-            backward!(input, layers[k], output_new)
-            output_new .= input
-            J .= J_new
-        end
+    # else fall back to standard calculation
+    else 
+
+        # perform forward pass over last layer
+        backward_inv_jacobian!(input, J_new, last(layers), output_new)
+        
+        # calculate total jacobian
+        mul!(J, J_new, J_old)
         
     end
+
+    # update unless we are on the last/first layer
+    if length(layers) > 1
+
+        # update intermediate output
+        output_new .= input
+        
+        # update old jacobian
+        J_old .= J
+
+    end
+
+    # calculate backward inv jacobian of remaining layers
+    backward_inv_jacobian!(J, J_new, J_old, input, output_new, Base.front(layers))
+
+end
+
+# when no layers are left, stop the inplace recursion
+backward_inv_jacobian!(J::Matrix{T1}, J_new::Matrix{T2}, J_old::Matrix{T3}, input::Vector{T4}, output_new::Vector{T5}, layers::Tuple{}) where { T1 <: Real, T2 <: Real,  T3 <: Real, T4 <: Real, T5 <: Real } = return
+
+
+# specify jacobian and inv_jacobian functions based on joint functions
+_jacobian(model::CompiledFlowModel, input::Vector{T}) where { T <: Real }     = forward_jacobian(model, input)[2]
+jacobian(model::CompiledFlowModel, input::Vector{T}) where { T <: Real }      = _jacobian(model, input)
+Broadcast.broadcasted(::typeof(jacobian), model::CompiledFlowModel, input::Vector{Vector{T}}) where { T <: Real } = broadcast(_jacobian, Ref(model), input)
+_inv_jacobian(model::CompiledFlowModel, output::Vector{T}) where { T <: Real }     = backward_inv_jacobian(model, output)[2]
+inv_jacobian(model::CompiledFlowModel, output::Vector{T}) where { T <: Real }      = _inv_jacobian(model, output)
+Broadcast.broadcasted(::typeof(inv_jacobian), model::CompiledFlowModel, output::Vector{Vector{T}}) where { T <: Real } = broadcast(_inv_jacobian, Ref(model), output)
+function jacobian!(J::Matrix{T1}, model::CompiledFlowModel, input::Vector{T2}) where { T1 <: Real, T2 <: Real }
     
+    # fetch dimension
+    dim    = getdim(model)
+    
+    # promote type for allocating output
+    T = promote_type(eltype(model), T1, T2)
+    
+    # allocate space for output and jacobian
+    output = zeros(T, dim)
+    J .= 0.0
+    for k = 1:dim
+        J[k,k] = 1.0
+    end
+
+    # calculate jacobian
+    forward_jacobian!(output, J, model, input)
+    
+end
+function inv_jacobian!(J::Matrix{T1}, model::CompiledFlowModel, output::Vector{T2}) where { T1 <: Real, T2 <: Real }
+    
+    # fetch dimension
+    dim    = getdim(model)
+    
+    # promote type for allocating output
+    T = promote_type(eltype(model), T1, T2)
+    
+    # allocate space for input and jacobian
+    input = zeros(T, dim)
+    J .= 0.0
+    for k = 1:dim
+        J[k,k] = 1.0
+    end
+
+    # calculate jacobian
+    backward_inv_jacobian!(input, J, model, output)
+    
+end
+
+# fallback joint functions over layers
+function forward_jacobian!(output::Vector{T1}, J_new::Matrix{T2}, layer::T, input::Vector{T3}) where { T1 <: Real, T2 <: Real, T3 <: Real, T <: AbstractLayer }
+    forward!(output, layer, input)
+    jacobian!(J_new, layer, input)
+end
+function backward_inv_jacobian!(input::Vector{T1}, J_new::Matrix{T2}, layer::T, output::Vector{T3}) where { T1 <: Real, T2 <: Real, T3 <: Real, T <: AbstractLayer }
+    backward!(input, layer, output)
+    inv_jacobian!(J_new, layer, output)
 end
 
 # extra utility functions
-det_jacobian(model::CompiledFlowModel, input::Array{T,1})           where { T <: Real} = det(jacobian(model, input))
-absdet_jacobian(model::CompiledFlowModel, input::Array{T,1})        where { T <: Real} = abs(det_jacobian(model, input))
-logdet_jacobian(model::CompiledFlowModel, input::Array{T,1})        where { T <: Real} = logdet(jacobian(model, input))
-logabsdet_jacobian(model::CompiledFlowModel, input::Array{T,1})     where { T <: Real} = logabsdet(jacobian(model, input))
+det_jacobian(model::CompiledFlowModel, input::Vector{T})           where { T <: Real} = det(jacobian(model, input))
+absdet_jacobian(model::CompiledFlowModel, input::Vector{T})        where { T <: Real} = abs(det_jacobian(model, input))
+logdet_jacobian(model::CompiledFlowModel, input::Vector{T})        where { T <: Real} = logdet(jacobian(model, input))
+logabsdet_jacobian(model::CompiledFlowModel, input::Vector{T})     where { T <: Real} = logabsdet(jacobian(model, input))
 
-detinv_jacobian(model::CompiledFlowModel, output::Array{T,1})       where { T <: Real} = det(inv_jacobian(model, output))
-absdetinv_jacobian(model::CompiledFlowModel, output::Array{T,1})    where { T <: Real} = abs(detinv_jacobian(model, output))
-logdetinv_jacobian(model::CompiledFlowModel, output::Array{T,1})    where { T <: Real} = logdet(inv_jacobian(model, output))
-logabsdetinv_jacobian(model::CompiledFlowModel, output::Array{T,1}) where { T <: Real} = logabsdet(inv_jacobian(model, output))
+detinv_jacobian(model::CompiledFlowModel, output::Vector{T})       where { T <: Real} = det(inv_jacobian(model, output))
+absdetinv_jacobian(model::CompiledFlowModel, output::Vector{T})    where { T <: Real} = abs(detinv_jacobian(model, output))
+logdetinv_jacobian(model::CompiledFlowModel, output::Vector{T})    where { T <: Real} = logdet(inv_jacobian(model, output))
+logabsdetinv_jacobian(model::CompiledFlowModel, output::Vector{T}) where { T <: Real} = logabsdet(inv_jacobian(model, output))
 
 
 # throw an error when the model has not yet been compiled
-_forward(model::FlowModel, input::Array{T1,1}) where { T1 <: Real }                                          = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-forward(model::FlowModel, input::Array{T,1}) where { T <: Real }                                             = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-Broadcast.broadcasted(::typeof(forward), model::FlowModel, input::Array{Array{T,1},1}) where { T <: Real }   = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-forward!(output::Array{T1,1}, model::FlowModel, input::Array{T2,1}) where { T1 <: Real, T2 <: Real }         = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-_backward(model::FlowModel, output::Array{T1,1}) where { T1 <: Real }                                        = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-backward(model::FlowModel, output::Array{T,1}) where { T <: Real }                                           = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-Broadcast.broadcasted(::typeof(backward), model::FlowModel, output::Array{Array{T,1},1}) where { T <: Real } = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-backward!(input::Array{T1,1}, model::FlowModel, output::Array{T2,1}) where { T1 <: Real, T2 <: Real }        = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-jacobian!(J_new::Array{T1,2}, model::FlowModel, input::Array{T2,1}) where { T1 <: Real, T2 <: Real }         = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-jacobian(model::FlowModel, input::Array{T,1}) where { T <: Real }                                            = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-Broadcast.broadcasted(::typeof(jacobian), model::FlowModel, input::Array{Array{T,1},1}) where { T <: Real }  = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-_jacobian(model::FlowModel, input::Array{T1,1}) where { T1 <: Real }                                         = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-_inv_jacobian(model::FlowModel, output::Array{T1,1}) where { T1 <: Real }                                    = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-inv_jacobian!(J_new::Array{T1,2}, model::FlowModel, output::Array{T2,1}) where { T1 <: Real, T2 <: Real }    = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+_forward(model::FlowModel, input::Vector{T1}) where { T1 <: Real }                                          = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+forward(model::FlowModel, input::Vector{T}) where { T <: Real }                                             = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+Broadcast.broadcasted(::typeof(forward), model::FlowModel, input::Vector{Vector{T}}) where { T <: Real }    = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+forward!(output::Vector{T1}, model::FlowModel, input::Vector{T2}) where { T1 <: Real, T2 <: Real }          = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+_backward(model::FlowModel, output::Vector{T1}) where { T1 <: Real }                                        = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+backward(model::FlowModel, output::Vector{T}) where { T <: Real }                                           = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+Broadcast.broadcasted(::typeof(backward), model::FlowModel, output::Vector{Vector{T}}) where { T <: Real }  = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+backward!(input::Vector{T1}, model::FlowModel, output::Vector{T2}) where { T1 <: Real, T2 <: Real }         = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+jacobian!(J_new::Matrix{T1}, model::FlowModel, input::Vector{T2}) where { T1 <: Real, T2 <: Real }          = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+jacobian(model::FlowModel, input::Vector{T}) where { T <: Real }                                            = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+Broadcast.broadcasted(::typeof(jacobian), model::FlowModel, input::Vector{Vector{T}}) where { T <: Real }   = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+_jacobian(model::FlowModel, input::Vector{T1}) where { T1 <: Real }                                         = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+_inv_jacobian(model::FlowModel, output::Vector{T1}) where { T1 <: Real }                                    = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+inv_jacobian!(J_new::Matrix{T1}, model::FlowModel, output::Vector{T2}) where { T1 <: Real, T2 <: Real }     = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
 
-det_jacobian(model::FlowModel, input::Array{T,1})           where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-absdet_jacobian(model::FlowModel, input::Array{T,1})        where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-logdet_jacobian(model::FlowModel, input::Array{T,1})        where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-logabsdet_jacobian(model::FlowModel, input::Array{T,1})     where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+det_jacobian(model::FlowModel, input::Vector{T})           where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+absdet_jacobian(model::FlowModel, input::Vector{T})        where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+logdet_jacobian(model::FlowModel, input::Vector{T})        where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+logabsdet_jacobian(model::FlowModel, input::Vector{T})     where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
 
-detinv_jacobian(model::FlowModel, output::Array{T,1})       where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-absdetinv_jacobian(model::FlowModel, output::Array{T,1})    where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-logdetinv_jacobian(model::FlowModel, output::Array{T,1})    where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
-logabsdetinv_jacobian(model::FlowModel, output::Array{T,1}) where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+detinv_jacobian(model::FlowModel, output::Vector{T})       where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+absdetinv_jacobian(model::FlowModel, output::Vector{T})    where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+logdetinv_jacobian(model::FlowModel, output::Vector{T})    where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))
+logabsdetinv_jacobian(model::FlowModel, output::Vector{T}) where { T <: Real} = throw(ArgumentError("Please first compile your model using `compiled_model = compile(model)`."))

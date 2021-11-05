@@ -14,7 +14,7 @@ using ReactiveMP
         compiled_model = compile(model)
         @test length(compiled_model.layers)      == 1
         @test typeof(compiled_model.layers[1])   <: AdditiveCouplingLayer
-        @test typeof(compiled_model.layers[1].f) <: PlanarFlow
+        @test typeof(compiled_model.layers[1].f[1]) <: PlanarFlow
 
         # check for two layers
         f1 = PlanarFlow()
@@ -25,10 +25,10 @@ using ReactiveMP
         compiled_model = compile(model)
         @test length(compiled_model.layers)      == 3
         @test typeof(compiled_model.layers[1])   <: AdditiveCouplingLayer
-        @test typeof(compiled_model.layers[1].f) <: PlanarFlow
+        @test typeof(compiled_model.layers[1].f[1]) <: PlanarFlow
         @test typeof(compiled_model.layers[2])   <: PermutationLayer
         @test typeof(compiled_model.layers[3])   <: AdditiveCouplingLayer
-        @test typeof(compiled_model.layers[3].f) <: PlanarFlow
+        @test typeof(compiled_model.layers[3].f[1]) <: PlanarFlow
 
     end
 
@@ -282,6 +282,22 @@ using ReactiveMP
         @test inv_jacobian(compiled_model, [3.0, 1.5]) == [-1.0197320743308804 1.0; 2.0197330107171334 -1.0000009182669414]
         @test inv_jacobian(compiled_model, [2.5, 5.0]) == [-1.1413016497063289 1.0; 4.412130707993816 -2.9896834976728544]
         @test inv_jacobian.(compiled_model, [[3.0, 1.5], [2.5, 5.0]]) == [[-1.0197320743308804 1.0; 2.0197330107171334 -1.0000009182669414], [-1.1413016497063289 1.0; 4.412130707993816 -2.9896834976728544]]
+
+    end
+
+    @testset "Joint processing functions" begin
+        model = FlowModel(
+            (
+                InputLayer(8),
+                AdditiveCouplingLayer(PlanarFlow()),
+                AdditiveCouplingLayer(PlanarFlow(); permute=false)
+            )
+        )
+        compiled_model = compile(model)
+        x = randn(8)
+        @test forward_jacobian(compiled_model, x) == (forward(compiled_model, x), jacobian(compiled_model, x))
+        @test backward_inv_jacobian(compiled_model, x) == (backward(compiled_model, x), inv_jacobian(compiled_model, x))
+        @test inv(jacobian(compiled_model, x)) ≈ inv_jacobian(compiled_model, forward(compiled_model, x))
 
     end
 
